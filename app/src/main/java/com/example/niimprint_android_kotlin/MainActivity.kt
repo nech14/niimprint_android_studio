@@ -3,11 +3,10 @@ package com.example.niimprint_android_kotlin
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.graphics.Matrix
 import android.os.Build
 import android.os.Bundle
 import android.widget.ArrayAdapter
@@ -24,11 +23,10 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
-    private val bluetoothAdapter: BluetoothAdapter? by lazy {
-        BluetoothAdapter.getDefaultAdapter()
-    }
+    private lateinit var bluetoothManager: BluetoothManager
+    private lateinit var bluetoothAdapter: BluetoothAdapter
+    private lateinit var bleManager: BleManager
 
-    // Runtime permission launcher для Android 12+
     private val requestBluetoothPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
             if (permissions.values.any { !it }) {
@@ -40,7 +38,12 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Запросим разрешения на Android 12+
+        bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        bluetoothAdapter = bluetoothManager.adapter
+
+        bleManager = BleManager(this)
+
+        // Запрос разрешений на Android 12+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             requestBluetoothPermissions.launch(
                 arrayOf(
@@ -50,71 +53,63 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // Кнопка запуска
-        findViewById<Button>(R.id.start_button).setOnClickListener {
+        val startButton: Button = findViewById(R.id.start_button)
+        startButton.setOnClickListener {
             showBluetoothDevicesDialog()
         }
     }
 
     private fun showBluetoothDevicesDialog() {
-        // Проверка разрешений
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Нет разрешения на Bluetooth", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val pairedDevices = bluetoothAdapter?.bondedDevices?.toList()
-        if (pairedDevices.isNullOrEmpty()) {
+        val pairedDevices = bluetoothAdapter.bondedDevices.toList()
+        if (pairedDevices.isEmpty()) {
             Toast.makeText(this, "Нет сопряжённых Bluetooth-устройств", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Создаём список имён устройств, если имя null — используем MAC
         val deviceNames = pairedDevices.map { it.name ?: it.address }
-
         val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, deviceNames)
 
         AlertDialog.Builder(this)
             .setTitle("Выберите принтер")
             .setAdapter(adapter) { dialog, which ->
                 val selectedDevice = pairedDevices[which]
-                findPrinterAndPrint(selectedDevice)
+                connectAndPrint(selectedDevice)
                 dialog.dismiss()
             }
             .setNegativeButton("Отмена") { dialog, _ -> dialog.dismiss() }
             .show()
     }
 
-    private fun findPrinterAndPrint(device: BluetoothDevice) {
+    private fun connectAndPrint(device: BluetoothDevice) {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Нет разрешения на Bluetooth", Toast.LENGTH_SHORT).show()
             return
         }
 
+        bleManager.connect(device)
+        Toast.makeText(this, "Подключение к ${device.name ?: device.address}...", Toast.LENGTH_SHORT).show()
+
+        // После подключения BLE запускаем печать
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // Инициализация клиента через MAC
-                val printerClient = NiimbotPrinterClient(device.address, bluetoothAdapter!!)
+                val printerClient = NiimbotPrinterClient(device.address, bluetoothAdapter)
+                val bmp = BitmapFactory.decodeResource(resources, R.drawable.test_label_80x50)
 
-                val bmp: Bitmap = BitmapFactory.decodeResource(resources, R.drawable.test_label_80x50)
-//                val bmp = Bitmap.createBitmap(384, 100, Bitmap.Config.ARGB_8888)
-//                bmp.eraseColor(Color.BLACK)
-
-                val success = printerClient.printLabel(
+                printerClient.printLabel(
                     image = bmp,
                     labelQty = 1,
-                    labelType = 1,   // стандартная этикетка B21S
-                    labelDensity = 3 // средняя плотность
+                    labelType = 1,
+                    labelDensity = 3
                 )
 
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        if (success) "Печать отправлена" else "Ошибка печати",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    Toast.makeText(this@MainActivity, "Печать отправлена", Toast.LENGTH_SHORT).show()
                 }
-
             } catch (e: Exception) {
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
@@ -123,6 +118,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        bleManager.disconnect()
+    }
 }
-
-
