@@ -20,6 +20,7 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.os.Bundle
+import android.util.Log
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.Toast
@@ -96,7 +97,9 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun connectAndPrint(device: BluetoothDevice) {
         // Создаем хардкодную картинку
-        val bitmapToPrint = createBitmapFromResource(this, R.drawable.test_label_80x50)
+//        val bitmapToPrint = createBitmapFromResource(this, R.drawable.test_label_80x50)
+        val bitmapToPrint = createDummyBitmap()
+        lateinit var bleManager: NiimbotBleManager
 
         // Подключаемся к GATT-серверу устройства
         device.connectGatt(this, false, object : BluetoothGattCallback() {
@@ -118,14 +121,23 @@ class MainActivity : AppCompatActivity() {
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     // 3. Сервисы найдены! Можно отправлять картинку.
-                    val bleManager = NiimbotBleManager(gatt)
+                    bleManager = NiimbotBleManager(gatt)
 
                     // ВАЖНО: BluetoothGattCallback работает в фоновом потоке.
                     // Печать займет время, поэтому просто вызываем функцию из предыдущего ответа
                     lifecycleScope.launch {
-                        printJob(bleManager, bitmapToPrint)
+                        printJob(bleManager, bitmapToPrint, gatt)
                     }
                 }
+            }
+
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                Log.d("NIIMBOT", "Write status: $status")
+                bleManager.onWriteCompleted(status)
             }
         })
     }
@@ -224,122 +236,156 @@ class NiimbotPacket(val type: Byte, val data: ByteArray = ByteArray(0)) {
 
 class NiimbotBleManager(private val gatt: BluetoothGatt) {
 
-    // Стандартные UUID для Niimbot
-    private val SERVICE_UUID = UUID.fromString("0000ff00-0000-1000-8000-00805f9b34fb")
-    private val WRITE_UUID = UUID.fromString("0000ff02-0000-1000-8000-00805f9b34fb")
+    private val SERVICE_UUID =
+        UUID.fromString("0000ff00-0000-1000-8000-00805f9b34fb")
+    private val WRITE_UUID =
+        UUID.fromString("0000ff02-0000-1000-8000-00805f9b34fb")
+
+    private var writeContinuation: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    fun onWriteCompleted(status: Int) {
+        if (status == BluetoothGatt.GATT_SUCCESS) {
+            writeContinuation?.complete(Unit)
+        } else {
+            writeContinuation?.completeExceptionally(
+                RuntimeException("Write failed with status $status")
+            )
+        }
+    }
 
     @SuppressLint("MissingPermission")
-    fun writePacket(packet: NiimbotPacket): Boolean {
-        val service = gatt.getService(SERVICE_UUID) ?: return false
-        val characteristic = service.getCharacteristic(WRITE_UUID)
-            ?: service.getCharacteristic(UUID.fromString("0000ff01-0000-1000-8000-00805f9b34fb"))
-            ?: return false
+    suspend fun writePacket(packet: NiimbotPacket) {
+
+        val service = gatt.getService(SERVICE_UUID) ?: return
+        val characteristic =
+            service.getCharacteristic(WRITE_UUID) ?: return
+
+        characteristic.writeType =
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
         characteristic.value = packet.toBytes()
-        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        return gatt.writeCharacteristic(characteristic)
+
+        writeContinuation = kotlinx.coroutines.CompletableDeferred()
+
+        val started = gatt.writeCharacteristic(characteristic)
+
+        if (!started) {
+            throw RuntimeException("writeCharacteristic returned false")
+        }
+
+        // ⬇️ ВОТ ЭТО ГЛАВНОЕ
+        writeContinuation?.await()
     }
 }
-
 
 
 @SuppressLint("MissingPermission")
-suspend fun printJob(bleManager: NiimbotBleManager, bitmap: Bitmap) {
-    withContext(Dispatchers.IO) {
-        // Функция-помощник для безопасной отправки
-        val safeWrite = { packet: NiimbotPacket, sleep: Long ->
-            val res = bleManager.writePacket(packet)
-            android.util.Log.d("NIIMBOT", "Packet ${packet.type} sent: $res")
-            Thread.sleep(sleep)
-            res
-        }
+suspend fun printJob(
+    bleManager: NiimbotBleManager,
+    bitmap: Bitmap,
+    gatt: BluetoothGatt
+) = withContext(Dispatchers.IO) {
 
-        // 1. Старт
-        safeWrite(NiimbotPacket(0x01, byteArrayOf(0x01)), 200)
-
-        // 2. Очистка очереди (Команда 32 / 0x20)
-        safeWrite(NiimbotPacket(0x20, byteArrayOf(0x01)), 100)
-
-        // 3. Размеры (Команда 19 / 0x13) - ОЧЕНЬ ВАЖНО, чтобы было TRUE
-        val dimension = byteArrayOf(
-            (bitmap.height shr 8).toByte(), (bitmap.height and 0xFF).toByte(),
-            (bitmap.width shr 8).toByte(), (bitmap.width and 0xFF).toByte()
-        )
-        safeWrite(NiimbotPacket(0x13, dimension), 100)
-
-        // 4. Плотность и Тип (33 и 35)
-        safeWrite(NiimbotPacket(0x21, byteArrayOf(0x03)), 100)
-        safeWrite(NiimbotPacket(0x23, byteArrayOf(0x01)), 100)
-
-        // 5. СТАРТ СТРАНИЦЫ (Команда 3 / 0x03) - ЕСЛИ ТУТ FALSE, ПЕЧАТИ НЕ БУДЕТ
-        safeWrite(NiimbotPacket(0x03, byteArrayOf(0x01)), 200)
-
-        // 6. Данные строк
-        val height = bitmap.height
-        android.util.Log.d("NIIMBOT", "Starting to send $height rows...")
-
-        for (y in 0 until height) {
-            val rowBytes = extract1BitB21Row(bitmap, y)
-            val payload = ByteArray(3 + rowBytes.size)
-            payload[0] = (y shr 8).toByte()
-            payload[1] = (y and 0xFF).toByte()
-            payload[2] = 0x01.toByte() // Количество повторений строки
-            System.arraycopy(rowBytes, 0, payload, 3, rowBytes.size)
-
-            val packet = NiimbotPacket(0x85.toByte(), payload)
-            var success = bleManager.writePacket(packet)
-
-            if (!success) {
-                // Если не ушло, пробуем еще раз с задержкой
-                delay(50)
-                success = bleManager.writePacket(packet)
-            }
-
-            // ОБЯЗАТЕЛЬНО добавьте этот лог, чтобы увидеть, уходят ли строки!
-            if (y % 10 == 0) { // Логаем каждую 10-ю строку, чтобы не спамить
-                android.util.Log.d("NIIMBOT", "Row $y sent: $success")
-            }
-
-            delay(20) // Увеличим немного задержку для стабильности
-        }
-
-        // 7. КОНЕЦ (0xE3 и 0xF3)
-        delay(200)
-        safeWrite(NiimbotPacket(0xE3.toByte(), byteArrayOf(0x01)), 200)
-        safeWrite(NiimbotPacket(0xF3.toByte(), byteArrayOf(0x01)), 200)
-
-        android.util.Log.d("NIIMBOT", "Print Job Finished")
+    suspend fun write(type: Int, data: ByteArray, delayAfter: Long = 80) {
+        bleManager.writePacket(NiimbotPacket(type.toByte(), data))
+        delay(delayAfter)
     }
+
+    // --- 1. Сброс и настройка ---
+    write(0x20, byteArrayOf(0x01)) // Clear buffer
+    write(0x21, byteArrayOf(0x05)) // Density
+    write(0x23, byteArrayOf(0x01)) // Label type
+
+    // --- 2. Старт ---
+    write(0x01, byteArrayOf(0x01), 150) // START_PRINT
+    write(0x03, byteArrayOf(0x01), 150) // START_PAGE_PRINT
+
+    // --- 3. Размер (width, height) ---
+    val dimension = byteArrayOf(
+        (bitmap.width shr 8).toByte(),
+        (bitmap.width and 0xFF).toByte(),
+        (bitmap.height shr 8).toByte(),
+        (bitmap.height and 0xFF).toByte()
+    )
+
+    write(0x13, dimension, 150)
+
+    // --- 4. Печать строк ---
+    for (y in 0 until bitmap.height) {
+
+        val rowBytes = extract1BitB21Row(bitmap, y)
+
+        val rowBytesCount = rowBytes.size
+        val payload = ByteArray(6 + rowBytesCount)
+
+        payload[0] = (y shr 8).toByte()
+        payload[1] = (y and 0xFF).toByte()
+        payload[2] = 0
+        payload[3] = 0
+        payload[4] = rowBytesCount.toByte()
+        payload[5] = 0x01
+
+        System.arraycopy(rowBytes, 0, payload, 6, rowBytesCount)
+
+        bleManager.writePacket(NiimbotPacket(0x85.toByte(), payload))
+
+        // 🔥 КЛЮЧЕВОЕ — стабильный темп, не 5мс, не 15, а нормальный
+
+        if (rowBytes.all { it == 0.toByte() }) {
+            Log.d("NIIMBOT", "Row $y EMPTY")
+        }
+    }
+
+    // --- 5. Завершение ---
+    delay(300)
+    write(0xE3, byteArrayOf(0x01), 200) // End page
+    write(0xF3, byteArrayOf(0x01), 200) // End print
+
+    Log.d("NIIMBOT", "Disconnecting...")
+    gatt.disconnect()
+    gatt.close()
 }
 
 fun extract1BitB21Row(bitmap: Bitmap, y: Int): ByteArray {
-    val width = 384
-    val rowBytes = ByteArray(width / 8)
+    val rowBytes = ByteArray(384 / 8)
 
-    for (x in 0 until width) {
-        if (x >= bitmap.width) {
-            // Если картинка уже закончилась по ширине, забиваем остаток "белым"
-            // В Niimbot обычно 0 — это белый, но попробуем логику 0xFF для пустоты ниже
-            continue
-        }
-
-        val pixel = bitmap.getPixel(x, y)
-        val r = (pixel shr 16) and 0xFF
-        val g = (pixel shr 8) and 0xFF
-        val b = pixel and 0xFF
-
-        // Порог яркости (сделаем чуть чувствительнее)
-        val luminance = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-
-        // ВАЖНО: Попробуем логику, где 1 — это ЧЕРНЫЙ
-        if (luminance < 150) {
-            val byteIndex = x / 8
-            val bitPosition = 7 - (x % 8)
-            rowBytes[byteIndex] = (rowBytes[byteIndex].toInt() or (1 shl bitPosition)).toByte()
+    if (y in 50..60) {
+        for (i in rowBytes.indices) {
+            rowBytes[i] = 0xFF.toByte()
         }
     }
+
     return rowBytes
 }
+//
+//fun extract1BitB21Row(bitmap: Bitmap, y: Int): ByteArray {
+//    Log.d("NIIMBOT", "Bitmap size: ${bitmap.width} x ${bitmap.height}")
+//    val width = 384
+//    val rowBytes = ByteArray(width / 8)
+//
+//    for (x in 0 until width) {
+//        if (x >= bitmap.width) break
+//
+//        val pixel = bitmap.getPixel(x, y)
+//
+//        val r = Color.red(pixel)
+//        val g = Color.green(pixel)
+//        val b = Color.blue(pixel)
+//
+//        // Нормальная яркость
+//        val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+//
+//        // Порог (можно менять)
+//        if (gray < 160) {   // попробуй 140–180
+//            val byteIndex = x / 8
+//            val bitPosition = 7 - (x % 8)
+//            rowBytes[byteIndex] =
+//                (rowBytes[byteIndex].toInt() or (1 shl bitPosition)).toByte()
+//        }
+//    }
+//
+//    return rowBytes
+//}
 
 fun createBitmapFromResource(context: Context, resId: Int): Bitmap {
     val options = BitmapFactory.Options().apply {
