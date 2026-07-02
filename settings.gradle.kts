@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "niimprint_android_kotlin"
 include(":app")
+include(":niimprint")
