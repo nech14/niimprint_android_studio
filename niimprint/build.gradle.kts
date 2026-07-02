@@ -40,9 +40,9 @@ dependencies {
 publishing {
     publications {
         register<MavenPublication>("release") {
-            groupId = "com.niimprint"
+            groupId = providers.gradleProperty("group").orElse("com.niimprint").get()
             artifactId = "niimprint"
-            version = "0.1.0"
+            version = providers.gradleProperty("version").orElse("0.1.0").get()
 
             afterEvaluate {
                 from(components["release"])
