@@ -11,6 +11,8 @@
         tools:ignore="CoarseFineLocation" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
     <application
         android:allowBackup="true"
