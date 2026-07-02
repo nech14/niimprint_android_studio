@@ -2,4 +2,4 @@ jdk:
   - openjdk17
 
 install:
-  - ./gradlew :niimprint:publishToMavenLocal -x test -x lint
+  - ./gradlew :niimprint:publishToMavenLocal -Pgroup=$GROUP.$ARTIFACT -Pversion=$VERSION -x test -x lint
