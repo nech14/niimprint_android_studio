@@ -1,25 +1,24 @@
-package com.example.niimprint_android_kotlin
+package com.niimprint
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.util.Log
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
-enum class HorizontalAlignment {
-    LEFT,
-    CENTER,
-    RIGHT
-}
-
+/**
+ * Lower-level print client that sends NIIMBOT protocol commands through a [NiimbotTransport].
+ *
+ * Most apps should use [NiimprintPrinter]. Use this class directly when you provide your own
+ * transport implementation or need tighter control over the connection lifecycle.
+ */
 class PrinterClient(
+    /** Transport used to write command packets and read printer responses. */
     private val transport: NiimbotTransport
 ) {
     private companion object {
         private const val TAG = "NIIMBOT"
-        private const val CANVAS_SIZE_PX = 320
         private const val BITMAP_BATCH_SIZE = 5
         private const val RASTER_START_DELAY_MS = 100L
         private const val RASTER_LINE_DELAY_MS = 3L
@@ -27,12 +26,28 @@ class PrinterClient(
 
     private val packetBuffer = mutableListOf<Byte>()
 
+    /**
+     * Prints [bitmap] with default image preparation settings and a custom [density].
+     *
+     * This overload is kept for simple integrations. Use [printImage] with [PrintOptions] when
+     * you need to set canvas size, alignment, or rotation.
+     */
     suspend fun printImage(bitmap: Bitmap, density: Int = 5) {
-        val image = prepareBitmapForB21(rotateBitmap90(bitmap))
+        printImage(bitmap, PrintOptions(density = density))
+    }
+
+    /**
+     * Prints [bitmap] using explicit [options].
+     *
+     * The method performs printer initialization, prepares the bitmap, sends raster packets, waits
+     * for raster acknowledgement/status, and finalizes the print job.
+     */
+    suspend fun printImage(bitmap: Bitmap, options: PrintOptions = PrintOptions()) {
+        val image = prepareBitmapForPrint(bitmap, options)
 
         connectPrinter()
         setLabelType(1)
-        setLabelDensity(density)
+        setLabelDensity(options.density)
 
         startPrint()
         getPrintStatus()
@@ -87,7 +102,6 @@ class PrinterClient(
             logBatchInfo(batchIndex, batch, "BEFORE_FINAL_SEND")
             sendBatch(batch)
             logBatchInfo(batchIndex, batch, "AFTER_FINAL_SEND")
-            batchIndex++
 
             delay(RASTER_LINE_DELAY_MS)
         }
@@ -191,21 +205,14 @@ class PrinterClient(
         return false
     }
 
-    private fun rotateBitmap90(source: Bitmap): Bitmap {
-        val matrix = Matrix()
-        matrix.postRotate(90f)
-        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-    }
-
-    private fun prepareBitmapForB21(
+    private fun prepareBitmapForPrint(
         bitmap: Bitmap,
-        targetWidth: Int = 320,
-        targetHeight: Int = 320,
-        horizontalAlignment: HorizontalAlignment = HorizontalAlignment.CENTER
+        options: PrintOptions
     ): Bitmap {
+        val rotated = rotateBitmap(bitmap, options.rotation)
         val result = Bitmap.createBitmap(
-            targetWidth,
-            targetHeight,
+            options.targetWidth,
+            options.targetHeight,
             Bitmap.Config.ARGB_8888
         )
 
@@ -213,36 +220,45 @@ class PrinterClient(
         canvas.drawColor(android.graphics.Color.WHITE)
 
         val scale = minOf(
-            targetWidth.toFloat() / bitmap.width,
-            targetHeight.toFloat() / bitmap.height
+            options.targetWidth.toFloat() / rotated.width,
+            options.targetHeight.toFloat() / rotated.height
         )
 
-        val scaledWidth = (bitmap.width * scale).toInt()
-        val scaledHeight = (bitmap.height * scale).toInt()
+        val scaledWidth = (rotated.width * scale).toInt().coerceAtLeast(1)
+        val scaledHeight = (rotated.height * scale).toInt().coerceAtLeast(1)
 
-        val left = when (horizontalAlignment) {
+        val left = when (options.horizontalAlignment) {
             HorizontalAlignment.LEFT -> 0
-            HorizontalAlignment.CENTER -> (targetWidth - scaledWidth) / 2
-            HorizontalAlignment.RIGHT -> targetWidth - scaledWidth
+            HorizontalAlignment.CENTER -> (options.targetWidth - scaledWidth) / 2
+            HorizontalAlignment.RIGHT -> options.targetWidth - scaledWidth
         }
 
-        val top = (targetHeight - scaledHeight) / 2
+        val top = when (options.verticalAlignment) {
+            VerticalAlignment.TOP -> 0
+            VerticalAlignment.CENTER -> (options.targetHeight - scaledHeight) / 2
+            VerticalAlignment.BOTTOM -> options.targetHeight - scaledHeight
+        }
 
-        val destRect = android.graphics.Rect(
+        val destRect = Rect(
             left,
             top,
             left + scaledWidth,
             top + scaledHeight
         )
 
-        canvas.drawBitmap(
-            bitmap,
-            null,
-            destRect,
-            null
-        )
+        canvas.drawBitmap(rotated, null, destRect, null)
 
         return result
+    }
+
+    private fun rotateBitmap(source: Bitmap, rotation: ImageRotation): Bitmap {
+        if (rotation == ImageRotation.NONE) {
+            return source
+        }
+
+        val matrix = Matrix()
+        matrix.postRotate(rotation.degrees)
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
     private suspend fun connectPrinter() {
@@ -560,7 +576,6 @@ class PrinterClient(
             else -> null
         }
     }
-
 
     private fun packetEndY(packet: NiimbotPacket): Int? {
         val y = packetStartY(packet) ?: return null

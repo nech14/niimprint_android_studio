@@ -1,4 +1,4 @@
-package com.example.niimprint_android_kotlin
+package com.niimprint
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -11,10 +11,21 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 
+/**
+ * Bluetooth Classic RFCOMM transport for NIIMBOT printers.
+ *
+ * The manager opens a socket to a paired [BluetoothDevice], writes NIIMBOT packets, reads printer
+ * responses, and closes the socket. Runtime Bluetooth permissions are the responsibility of the
+ * host app.
+ */
 class NiimbotClassicManager(
+    /** Paired Bluetooth device representing the target printer. */
     private val device: BluetoothDevice,
+    /** RFCOMM channel used for the first connection attempt. */
     private val channel: Int = 1,
+    /** Delay after each write or chunk, in milliseconds. */
     private val writeDelayMs: Long = 3L,
+    /** Optional write chunk size. Use 0 to send each byte array as one write. */
     private val chunkSize: Int = 0
 ) : NiimbotTransport {
 
@@ -30,6 +41,11 @@ class NiimbotClassicManager(
     private var input: InputStream? = null
     private var output: OutputStream? = null
 
+    /**
+     * Opens the Bluetooth socket and prepares input/output streams.
+     *
+     * The method first tries a direct RFCOMM channel and falls back to the standard SPP UUID.
+     */
     @SuppressLint("MissingPermission")
     suspend fun connect(): Unit = withContext(Dispatchers.IO) {
         if (socket?.isConnected == true) {
@@ -69,10 +85,12 @@ class NiimbotClassicManager(
         return fallbackSocket
     }
 
+    /** Sends a complete NIIMBOT packet over the socket. */
     override suspend fun writePacket(packet: NiimbotPacket) {
         writeBytes(packet.toBytes())
     }
 
+    /** Writes raw bytes to the socket output stream. */
     override suspend fun writeBytes(data: ByteArray): Unit = withContext(Dispatchers.IO) {
         val stream = output ?: throw IllegalStateException("Printer is not connected")
 
@@ -100,6 +118,11 @@ class NiimbotClassicManager(
         }
     }
 
+    /**
+     * Reads available bytes from the socket input stream until [timeoutMs] expires.
+     *
+     * Returns null when the printer sends no data in the given timeout.
+     */
     override suspend fun readBytes(timeoutMs: Long): ByteArray? = withContext(Dispatchers.IO) {
         val stream = input ?: return@withContext null
         val buffer = ByteArray(1024)
@@ -121,6 +144,7 @@ class NiimbotClassicManager(
         null
     }
 
+    /** Closes input stream, output stream, and socket, ignoring close failures. */
     fun close() {
         try {
             input?.close()

@@ -1,6 +1,6 @@
-package com.example.niimprint_android_kotlin
+package com.niimprint
 
-enum class RequestCode(val code: Int) {
+internal enum class RequestCode(val code: Int) {
     SET_LABEL_DENSITY(0x21),
     SET_LABEL_TYPE(0x23),
     START_PRINT(0x01),

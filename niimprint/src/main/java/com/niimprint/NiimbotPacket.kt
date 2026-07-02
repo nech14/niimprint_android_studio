@@ -1,12 +1,20 @@
-package com.example.niimprint_android_kotlin
+package com.niimprint
 
+/**
+ * NIIMBOT protocol packet.
+ *
+ * Packets are encoded as header, command code, payload length, payload, checksum, and footer.
+ */
 class NiimbotPacket(
+    /** Packet command or response code. */
     val code: Int,
+    /** Packet payload bytes. Must be 255 bytes or less when encoded. */
     val data: ByteArray = ByteArray(0)
 ) {
-    constructor(requestCode: RequestCode, data: ByteArray = ByteArray(0)) :
+    internal constructor(requestCode: RequestCode, data: ByteArray = ByteArray(0)) :
             this(requestCode.code, data)
 
+    /** Encodes this packet into the raw byte format expected by the printer. */
     fun toBytes(): ByteArray {
         require(data.size <= 255) { "Packet payload too large: ${data.size}" }
 
@@ -30,6 +38,7 @@ class NiimbotPacket(
     }
 
     companion object {
+        /** Parses and validates a raw NIIMBOT packet. */
         fun fromBytes(packet: ByteArray): NiimbotPacket {
             require(packet.size >= 7) { "Packet too short" }
             require(packet[0] == 0x55.toByte() && packet[1] == 0x55.toByte()) {
